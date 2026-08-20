@@ -130,8 +130,15 @@ function createWindow(url: string): void {
     if (!target.startsWith(url)) event.preventDefault()
   })
   // 外链一律交给系统浏览器，不在窗口内开新标签。
+  // 指向 dsh 服务器自身的 URL（同 origin）不交给浏览器：桌面窗口本身就是 UI，
+  // 避免 UI 在浏览器里重复打开自己（否则每次启动会额外弹出一个浏览器标签）。
   window.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (target.startsWith('http://') || target.startsWith('https://')) void shell.openExternal(target)
+    const isSelf = target.startsWith(url)
+    if ((target.startsWith('http://') || target.startsWith('https://')) && !isSelf) {
+      void shell.openExternal(target)
+    } else {
+      diag(`window.open suppressed: ${target} (selfOrigin=${isSelf})`)
+    }
     return { action: 'deny' }
   })
   void window.loadURL(splashHtml())
