@@ -62,14 +62,22 @@ jobs:
         run: npm run dist:publish
 
       - name: Upload companion engine zip to the same release
+        # electron-builder 创建的 release 标签是 v<version>（如 v0.1.0-rc.5），
+        # 不是触发事件的 tag（dsh-desktop-v*），所以从 package.json 读版本号定位。
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $v = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = "v$v"
           $zip = Get-ChildItem release/dsh-runtime-v*.zip | Select-Object -First 1
           if ($zip) {
             $sha = "$($zip.FullName).sha256"
-            gh release upload "${{ github.ref_name }}" $zip.FullName $sha --clobber
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -ne 0) {
+              gh release create $tag --title "DeepSeek Harness v$v" --notes "DeepSeek Harness desktop v$v" --draft
+            }
+            gh release upload $tag $zip.FullName $sha --clobber
           }
 
       - name: Publish release (draft -> public)
@@ -78,4 +86,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false
+        run: |
+          $v = (Get-Content package.json | ConvertFrom-Json).version
+          gh release edit "v$v" --draft=false
