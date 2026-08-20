@@ -19,12 +19,14 @@ import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import {
   closeSync,
+  createReadStream,
   createWriteStream,
   existsSync,
   mkdirSync,
   openSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
   readdirSync,
 } from 'node:fs'
@@ -185,22 +187,25 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
   return null
 }
 
-/** 下载超时：15 分钟（约 100MB，国内网络可能很慢）。 */
-const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000
-
 /**
  * 更新引擎（流式下载 zip → sha256 校验 → bsdtar 解压）。全程通过进度窗口
  * 显示阶段与下载百分比；替换前停掉 dsh 服务器以释放文件句柄。
+ *
+ * 慢网友好：
+ * - 下载无硬超时（进度窗口持续显示百分比，用户可一直等待）；
+ * - 断点续传：本地已有部分下载时用 Range 请求从断点继续（进度/校验都会计入
+ *   已有部分），中途取消后下次更新自动续传，不浪费已下载的数据；
+ * - 取消：signal.abort()（用户关闭进度窗口）立即中止下载，保留已下载部分。
+ * @param signal - 取消信号（AbortController），中止下载/更新。
  * @returns “恢复”函数：替换完成后若用户选择不重启，用它拉起服务器（新引擎）。
  */
-async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() => Promise<void>) | null> {
+async function downloadAndInstallRuntime(info: RuntimeUpdateInfo, signal: AbortSignal): Promise<(() => Promise<void>) | null> {
   const userData = app.getPath('userData')
   const zipDir = join(userData, 'updates')
   mkdirSync(zipDir, { recursive: true })
   const zipPath = join(zipDir, `dsh-runtime-v${info.version}.zip`)
   diag(`runtime download start ${info.url}`)
 
-  showEngineProgress()
   let sha256 = info.sha256
   if (sha256 === '') {
     // 尝试拉取 <zip>.sha256 校验文件（自动构建 Action 发布）；取不到则跳过校验。
@@ -211,27 +216,53 @@ async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() =
       /* 无校验文件 */
     }
   }
+  // 断点续传：本地已有部分（上次下载中断/取消残留）从该字节继续。
+  let start = 0
+  try {
+    if (existsSync(zipPath)) start = statSync(zipPath).size
+  } catch {
+    start = 0
+  }
+  if (start > 0) diag(`resume runtime download from byte ${start}`)
   updateEngineProgress(t('prog.downloading', { version: info.version, pct: '0', mb: '0', totalMb: '?' }), 0)
   setTaskbarProgress(0)
+  const headers: Record<string, string> = {}
+  if (start > 0) headers.Range = `bytes=${start}-`
   let res: Response
   try {
-    res = await fetch(info.url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+    res = await fetch(info.url, { signal, headers })
   } catch (error) {
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error('下载超时（15 分钟），请检查网络后重试')
-    }
+    if (signal.aborted) throw new Error('用户取消了引擎更新')
     throw error
   }
-  if (!res.ok || res.body === null) {
+  if (res.status === 206) {
+    // 续传成功：响应体是剩余部分。
+  } else if (res.status === 200) {
+    // 服务器忽略 Range：从头下载，清掉不完整的旧文件。
+    if (start > 0) {
+      diag('server ignored Range, restarting download from zero')
+      start = 0
+      rmSync(zipPath, { force: true })
+    }
+  } else {
     if (res.status === 404) {
       throw new Error(`官方引擎 v${info.version} 的更新包尚未构建完成（自动构建进行中），请稍后重试`)
     }
     throw new Error(`下载引擎更新失败（${res.status}）`)
   }
-  const total = Number(res.headers.get('content-length')) || 0
+  if (res.body === null) throw new Error('下载引擎更新失败（响应为空）')
+  const total = start + (Number(res.headers.get('content-length')) || 0)
   const hash = sha256 !== '' ? createHash('sha256') : null
-  rmSync(zipPath, { force: true })
-  const file = createWriteStream(zipPath)
+  if (hash !== null && start > 0) {
+    // 先对已下载部分计算哈希，续传部分随后续写继续累加。
+    await new Promise<void>((resolve, reject) => {
+      const rs = createReadStream(zipPath)
+      rs.on('data', (chunk: string | Buffer) => hash.update(chunk))
+      rs.on('end', () => resolve())
+      rs.on('error', reject)
+    })
+  }
+  const file = createWriteStream(zipPath, { flags: start > 0 ? 'a' : 'w' })
   // 用对象包装错误状态：TS 闭包分析会把“只在回调里赋值”的 let 变量推断为初始
   // 类型（null），导致收窄后变成 never；对象属性不受此限制。
   const fileState: { error: Error | null } = { error: null }
@@ -239,7 +270,7 @@ async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() =
     fileState.error = error
   })
   const reader = res.body.getReader()
-  let received = 0
+  let received = start
   let lastReport = 0
   try {
     for (;;) {
@@ -277,6 +308,7 @@ async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() =
       file.end((error?: Error | null) => (error === undefined || error === null ? resolve() : reject(error)))
     })
   }
+  if (signal.aborted) throw new Error('用户取消了引擎更新')
   if (hash !== null) {
     updateEngineProgress(t('prog.verifying'), null)
     setTaskbarProgress(0, true)
@@ -429,9 +461,12 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
       diag('runtime update postponed')
       return
     }
+    // 下载/解压期间的取消信号：用户关闭进度窗口即取消（已下载部分保留，下次续传）。
+    const abort = new AbortController()
     let restore: (() => Promise<void>) | null = null
     try {
-      restore = await downloadAndInstallRuntime(info)
+      showEngineProgress(() => abort.abort())
+      restore = await downloadAndInstallRuntime(info, abort.signal)
       diag(`runtime updated: v${current} -> v${info.version}`)
       hideEngineProgress()
       const { response: restartResponse } = await dialog.showMessageBox({
@@ -459,6 +494,11 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
       hideEngineProgress()
       // 替换失败时恢复服务器，避免应用处于“无服务器”状态。
       if (restore !== null) await restore().catch(() => undefined)
+      if (abort.signal.aborted) {
+        // 用户关闭进度窗口取消更新：静默退出（已下载部分保留在 updates/ 供续传）。
+        diag('runtime update cancelled by user')
+        return
+      }
       await dialog.showMessageBox({
         type: 'error',
         title: t('eng.failedTitle'),

@@ -91,6 +91,7 @@ const MESSAGES = {
     'prog.downloadingSize': '正在下载 v{version}…（已下载 {mb} MB）',
     'prog.verifying': '正在校验更新包（sha256）…',
     'prog.installing': '正在安装引擎 v{version}…',
+    'prog.hint': '关闭此窗口可取消更新（已下载部分会保留，下次继续）',
     // 恢复内置引擎
     'restore.title': '恢复内置引擎',
     'restore.devMode': '当前为开发模式，无内置引擎概念。',
@@ -177,6 +178,7 @@ const MESSAGES = {
     'prog.downloadingSize': 'Downloading v{version}… ({mb} MB downloaded)',
     'prog.verifying': 'Verifying update package (sha256)…',
     'prog.installing': 'Installing engine v{version}…',
+    'prog.hint': 'Closing this window cancels the update (downloaded data is kept and resumes next time)',
     'restore.title': 'Restore Bundled Engine',
     'restore.devMode': 'There is no bundled engine in dev mode.',
     'restore.alreadyBundled': 'You are already using the engine bundled with the shell.',
