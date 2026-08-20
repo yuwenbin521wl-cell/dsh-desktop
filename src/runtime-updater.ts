@@ -17,9 +17,20 @@
 import { app, dialog } from 'electron'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
+import {
+  closeSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  readdirSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { currentDshVersion, readRuntimeState, rmRuntimeDir, writeRuntimeState, bundledDshVersion, removeRuntimeState } from './runtime'
+import { hideEngineProgress, setTaskbarProgress, showEngineProgress, updateEngineProgress } from './engine-progress'
 import { diag } from './diag'
 import { t } from './i18n'
 
@@ -107,6 +118,21 @@ function isNewerVersion(candidate: string, current: string): boolean {
   return cp > rp
 }
 
+/** 检查阶段请求超时：45 秒（用户网络到 api.github.com 可能很慢）。 */
+const CHECK_TIMEOUT_MS = 45 * 1000
+
+/** 带超时的 fetch：超时/网络错误统一转为带中文说明的 Error（进度窗口会立刻显示失败原因）。 */
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(CHECK_TIMEOUT_MS) })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error('检查超时（45 秒），请检查网络后重试')
+    }
+    throw error
+  }
+}
+
 /**
  * 解析最新引擎信息：
  * 1. 自建源（DSH_DESKTOP_RUNTIME_URL → latest.json，含 version/url/sha256）优先；
@@ -120,7 +146,7 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
   const custom = process.env.DSH_DESKTOP_RUNTIME_URL
   if (custom !== undefined && custom !== '') {
     diag(`runtime feed: custom ${custom}`)
-    const res = await fetch(`${custom}/latest.json`, { headers: { Accept: 'application/json' } })
+    const res = await fetchWithTimeout(`${custom}/latest.json`, { headers: { Accept: 'application/json' } })
     if (!res.ok) throw new Error(`引擎更新源返回 ${res.status}`)
     const data = await res.json() as { version?: unknown; url?: unknown; sha256?: unknown }
     if (typeof data.version !== 'string' || typeof data.url !== 'string') {
@@ -135,7 +161,7 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
   }
   const repo = (process.env.DSH_DESKTOP_RUNTIME_REPO ?? RUNTIME_RELEASE_REPO).replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '')
   diag(`runtime feed: releases of ${repo} (dsh-engine-v*)`)
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, {
+  const res = await fetchWithTimeout(`https://api.github.com/repos/${repo}/releases?per_page=50`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
   })
   if (!res.ok) throw new Error(`GitHub Releases 查询失败（${res.status}）。请检查网络或 DSH_DESKTOP_RUNTIME_REPO 配置`)
@@ -159,41 +185,115 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
   return null
 }
 
-/** 更新引擎（zip 下载解压）。返回“恢复”函数。 */
+/** 下载超时：15 分钟（约 100MB，国内网络可能很慢）。 */
+const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
+ * 更新引擎（流式下载 zip → sha256 校验 → bsdtar 解压）。全程通过进度窗口
+ * 显示阶段与下载百分比；替换前停掉 dsh 服务器以释放文件句柄。
+ * @returns “恢复”函数：替换完成后若用户选择不重启，用它拉起服务器（新引擎）。
+ */
 async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() => Promise<void>) | null> {
   const userData = app.getPath('userData')
   const zipDir = join(userData, 'updates')
   mkdirSync(zipDir, { recursive: true })
   const zipPath = join(zipDir, `dsh-runtime-v${info.version}.zip`)
   diag(`runtime download start ${info.url}`)
-  const res = await fetch(info.url)
+
+  showEngineProgress()
+  let sha256 = info.sha256
+  if (sha256 === '') {
+    // 尝试拉取 <zip>.sha256 校验文件（自动构建 Action 发布）；取不到则跳过校验。
+    try {
+      const sumRes = await fetch(`${info.url}.sha256`, { signal: AbortSignal.timeout(15000) })
+      if (sumRes.ok) sha256 = (await sumRes.text()).trim().toLowerCase()
+    } catch {
+      /* 无校验文件 */
+    }
+  }
+  updateEngineProgress(t('prog.downloading', { version: info.version, pct: '0', mb: '0', totalMb: '?' }), 0)
+  setTaskbarProgress(0)
+  let res: Response
+  try {
+    res = await fetch(info.url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error('下载超时（15 分钟），请检查网络后重试')
+    }
+    throw error
+  }
   if (!res.ok || res.body === null) {
     if (res.status === 404) {
       throw new Error(`官方引擎 v${info.version} 的更新包尚未构建完成（自动构建进行中），请稍后重试`)
     }
     throw new Error(`下载引擎更新失败（${res.status}）`)
   }
-  const buffer = Buffer.from(await res.arrayBuffer())
-  if (info.sha256 === '') {
-    // 尝试拉取 <zip>.sha256 校验文件（自动构建 Action 发布）；取不到则跳过校验。
-    try {
-      const sumRes = await fetch(`${info.url}.sha256`)
-      if (sumRes.ok) info.sha256 = (await sumRes.text()).trim().toLowerCase()
-    } catch {
-      /* 无校验文件 */
+  const total = Number(res.headers.get('content-length')) || 0
+  const hash = sha256 !== '' ? createHash('sha256') : null
+  rmSync(zipPath, { force: true })
+  const file = createWriteStream(zipPath)
+  // 用对象包装错误状态：TS 闭包分析会把“只在回调里赋值”的 let 变量推断为初始
+  // 类型（null），导致收窄后变成 never；对象属性不受此限制。
+  const fileState: { error: Error | null } = { error: null }
+  file.on('error', (error: Error) => {
+    fileState.error = error
+  })
+  const reader = res.body.getReader()
+  let received = 0
+  let lastReport = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      received += value.length
+      if (hash !== null) hash.update(value)
+      if (!file.write(value)) await new Promise<void>((resolve) => file.once('drain', resolve))
+      if (fileState.error !== null) throw new Error(`写入更新包失败：${fileState.error.message}`)
+      // 进度 UI 节流：每 100ms 刷新一次窗口/任务栏。
+      const now = Date.now()
+      if (now - lastReport >= 100) {
+        lastReport = now
+        if (total > 0) {
+          const pct = received / total
+          updateEngineProgress(
+            t('prog.downloading', {
+              version: info.version,
+              pct: String(Math.round(pct * 100)),
+              mb: (received / 1048576).toFixed(1),
+              totalMb: (total / 1048576).toFixed(1),
+            }),
+            pct * 100,
+          )
+          setTaskbarProgress(Math.min(pct, 0.99))
+        } else {
+          updateEngineProgress(t('prog.downloadingSize', { version: info.version, mb: (received / 1048576).toFixed(1) }), null)
+          setTaskbarProgress(0, true)
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+    await new Promise<void>((resolve, reject) => {
+      file.end((error?: Error | null) => (error === undefined || error === null ? resolve() : reject(error)))
+    })
+  }
+  if (hash !== null) {
+    updateEngineProgress(t('prog.verifying'), null)
+    setTaskbarProgress(0, true)
+    const digest = hash.digest('hex')
+    if (digest !== sha256) {
+      rmSync(zipPath, { force: true })
+      throw new Error(`引擎更新包校验失败（sha256 不匹配，期望 ${sha256}，实际 ${digest}）`)
     }
   }
-  if (info.sha256 !== '') {
-    const hash = createHash('sha256').update(buffer).digest('hex')
-    if (hash !== info.sha256) throw new Error(`引擎更新包校验失败（sha256 不匹配，期望 ${info.sha256}，实际 ${hash}）`)
-  }
-  writeFileSync(zipPath, buffer)
-  diag(`runtime downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB`)
+  diag(`runtime downloaded ${(received / 1048576).toFixed(1)} MB`)
 
   // 替换前先停掉当前实例的 dsh 服务器，释放目标目录被占用的文件句柄。
   let restore: (() => Promise<void>) | null = null
   if (preInstallHook !== null) {
     diag('stopping dsh server before runtime swap')
+    updateEngineProgress(t('prog.installing', { version: info.version }), null)
+    setTaskbarProgress(0, true)
     restore = await preInstallHook()
   }
 
@@ -250,12 +350,19 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
     return
   }
   manualCheckPending = manual
+  // 手动检查：点击后立即给反馈（检查请求可能耗时数十秒，避免看起来“没反应”）。
+  if (manual) {
+    showEngineProgress()
+    updateEngineProgress(t('prog.checking'), null)
+    setTaskbarProgress(0, true)
+  }
   let info: RuntimeUpdateInfo | null = null
   try {
     info = await fetchRuntimeUpdateInfo()
   } catch (error) {
     diag(`runtime check failed: ${String(error)}`)
     if (manual) {
+      hideEngineProgress()
       manualCheckPending = false
       await dialog.showMessageBox({
         type: 'error',
@@ -267,6 +374,7 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
     return
   }
   manualCheckPending = false
+  if (manual) hideEngineProgress()
   if (info === null) {
     if (manual) {
       await dialog.showMessageBox({
@@ -325,6 +433,7 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
     try {
       restore = await downloadAndInstallRuntime(info)
       diag(`runtime updated: v${current} -> v${info.version}`)
+      hideEngineProgress()
       const { response: restartResponse } = await dialog.showMessageBox({
         type: 'info',
         title: t('eng.readyTitle'),
@@ -347,6 +456,7 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
       }
     } catch (error) {
       diag(`runtime update failed: ${String(error)}`)
+      hideEngineProgress()
       // 替换失败时恢复服务器，避免应用处于“无服务器”状态。
       if (restore !== null) await restore().catch(() => undefined)
       await dialog.showMessageBox({
