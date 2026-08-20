@@ -90,7 +90,10 @@ export function startDshServer(
   return new Promise((resolveStart, rejectStart) => {
     // 打包版把工作目录放到 userData（可写）；开发版沿用当前目录（仓库根附近）。
     const cwd = app.isPackaged ? app.getPath('userData') : process.cwd()
-    const child = spawn(nodeExe, [dshBin, 'web', '--port', '0'], {
+    // --no-open：dsh web 默认启动后会用系统默认浏览器打开自身页面（面向普通
+    // 用户启动 `dsh web` 的场景）；桌面版自己有窗口，必须关掉这个行为，
+    // 否则每次启动都会额外弹出一个浏览器标签。
+    const child = spawn(nodeExe, [dshBin, 'web', '--port', '0', '--no-open'], {
       cwd,
       env: { ...process.env, DSH_DESKTOP: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
