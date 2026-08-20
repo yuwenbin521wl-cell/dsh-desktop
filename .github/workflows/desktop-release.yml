@@ -2,6 +2,9 @@
 # 安装包并发布到本仓库 Releases（electron-builder --publish always）。
 # 同时把配套引擎 zip（dsh-runtime-vX.zip + .sha256）一并上传到同一 Release，
 # 方便用户回退到“与壳最适配”的引擎版本。
+#
+# 注意：desktop 构建工具在本仓库，官方仓库只作为代码源
+# （DSH_DESKTOP_REPO_ROOT 指向 harness）；官方仓库没有 desktop/ 目录。
 
 name: desktop-release
 
@@ -18,7 +21,10 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout official harness
+      - name: Checkout this repo (desktop build tooling)
+        uses: actions/checkout@v4
+
+      - name: Checkout official harness (source)
         uses: actions/checkout@v4
         with:
           repository: deepseek-ai/deepseek-harness
@@ -42,10 +48,11 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
-      - name: Build desktop installer + runtime zip
-        working-directory: harness/desktop
+      - name: Build and publish desktop installer
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DSH_DESKTOP_REPO_ROOT: ${{ github.workspace }}/harness
         # dist:publish = build + prepare:runtime + build:runtime-zip + electron-builder --publish always
         run: npm run dist:publish
 
@@ -54,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $zip = Get-ChildItem harness/desktop/release/dsh-runtime-v*.zip | Select-Object -First 1
+          $zip = Get-ChildItem release/dsh-runtime-v*.zip | Select-Object -First 1
           if ($zip) {
             $sha = "$($zip.FullName).sha256"
             gh release upload "${{ github.ref_name }}" $zip.FullName $sha --clobber

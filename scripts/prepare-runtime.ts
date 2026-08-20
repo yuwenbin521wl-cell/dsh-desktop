@@ -21,7 +21,9 @@ import { generateIcon } from './make-icon'
 
 const scriptsDir = __dirname
 const desktopRoot = resolve(scriptsDir, '..')
-const repoRoot = resolve(desktopRoot, '..')
+// 源码根（官方 harness checkout）：默认 desktop 的上一级；CI（engine-sync）里
+// desktop 工具在发布仓库、官方代码单独 checkout，用 DSH_DESKTOP_REPO_ROOT 指定。
+const repoRoot = resolve(process.env.DSH_DESKTOP_REPO_ROOT ?? resolve(desktopRoot, '..'))
 const runtimeDir = join(desktopRoot, '.runtime')
 const cacheDir = join(desktopRoot, '.cache')
 const nodeDir = join(runtimeDir, 'node')
