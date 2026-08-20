@@ -9,6 +9,8 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { connect } from 'node:net'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { app } from 'electron'
 
 /** dsh web 就绪行的正则：`dsh web: http://127.0.0.1:PORT (...)`。 */
@@ -114,6 +116,8 @@ export function startDshServer(
     }
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutText += chunk.toString()
+      // 服务器输出落盘，便于排查运行期插件/工具错误（原只保留退出时的 stderr）。
+      try { appendFileSync(join(app.getPath('userData'), 'dsh-server.log'), chunk) } catch { /* 忽略 */ }
       const match = URL_LINE.exec(stdoutText)
       if (match?.[1] === undefined) return
       const url = match[1]
@@ -132,6 +136,7 @@ export function startDshServer(
     })
     child.stderr?.on('data', (chunk: Buffer) => {
       stderrText += chunk.toString()
+      try { appendFileSync(join(app.getPath('userData'), 'dsh-server.log'), chunk) } catch { /* 忽略 */ }
     })
     child.on('error', (error) => {
       settle(new Error(`无法启动 dsh web：${error.message}`))
