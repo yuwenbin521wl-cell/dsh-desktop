@@ -59,3 +59,11 @@ jobs:
             $sha = "$($zip.FullName).sha256"
             gh release upload "${{ github.ref_name }}" $zip.FullName $sha --clobber
           }
+
+      - name: Publish release (draft -> public)
+        # electron-builder --publish 默认创建 draft release；draft 不算 latest，
+        # 用户端 electron-updater 查不到，必须转成正式 release。
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false
