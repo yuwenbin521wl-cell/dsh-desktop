@@ -133,12 +133,16 @@ function createWindow(url: string): void {
   // 指向 dsh 服务器自身的 URL（同 origin）不交给浏览器：桌面窗口本身就是 UI，
   // 避免 UI 在浏览器里重复打开自己（否则每次启动会额外弹出一个浏览器标签）。
   window.webContents.setWindowOpenHandler(({ url: target }) => {
+    // 指向本机 dsh 服务器的任何 window.open（含旧端口缓存地址）都拦截：
+    // 桌面窗口本身就是 UI，UI 没有理由在系统浏览器里再开一份自己。
+    // 外部 http(s) 链接（文档、GitHub 等）才交给系统浏览器。
+    const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?([/?#]|$)/i.test(target)
     const isSelf = target.startsWith(url)
-    if ((target.startsWith('http://') || target.startsWith('https://')) && !isSelf) {
+    if (!isLocal && (target.startsWith('http://') || target.startsWith('https://'))) {
       diag(`window.open -> external browser: ${target}`)
       void shell.openExternal(target)
     } else {
-      diag(`window.open suppressed: ${target} (selfOrigin=${isSelf})`)
+      diag(`window.open suppressed: ${target} (selfOrigin=${isSelf}, local=${isLocal})`)
     }
     return { action: 'deny' }
   })
