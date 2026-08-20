@@ -38,7 +38,7 @@ const MESSAGES = {
     // 关于
     'about.title': '关于',
     'about.message': 'DeepSeek Harness 桌面版',
-    'about.version': '版本：v{version}',
+    'about.version': '桌面版：v{version}',
     'about.engine': 'dsh 引擎：v{version}（内置 {builtin}）',
     'about.devMode': '开发模式（仓库构建）',
     'about.unknown': '未知',
@@ -128,7 +128,7 @@ const MESSAGES = {
     'tray.quit': 'Quit',
     'about.title': 'About',
     'about.message': 'DeepSeek Harness Desktop',
-    'about.version': 'Version: v{version}',
+    'about.version': 'Desktop: v{version}',
     'about.engine': 'dsh engine: v{version} (bundled {builtin})',
     'about.devMode': 'dev mode (repo build)',
     'about.unknown': 'unknown',
