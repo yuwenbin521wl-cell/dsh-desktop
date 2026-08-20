@@ -58,8 +58,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DSH_DESKTOP_REPO_ROOT: ${{ github.workspace }}/harness
-        # dist:publish = build + prepare:runtime + build:runtime-zip + electron-builder --publish always
-        run: npm run dist:publish
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run build
+          # 安装包内置引擎 = 线上最新 dsh-engine-v*（engine-sync 已发布的引擎 zip），
+          # 保证"壳每次构建后内置引擎与线上引擎同步"：用户装完壳即用最新引擎，
+          # 无需再手动检查引擎更新。线上暂无引擎 release 时回退本地源码构建。
+          $synced = $false
+          try {
+            $rels = gh release list --repo $env:GITHUB_REPOSITORY --limit 50 --json tagName,assets 2>$null | ConvertFrom-Json
+            $rel = $rels | Where-Object { $_.tagName -like 'dsh-engine-v*' } | Select-Object -First 1
+            $zip = $null
+            if ($rel) { $zip = $rel.assets | Where-Object { $_.name -like 'dsh-runtime-v*.zip' } | Select-Object -First 1 }
+            if ($zip) {
+              Write-Output "bundling engine from $($rel.tagName) ($($zip.name))"
+              gh release download $rel.tagName --repo $env:GITHUB_REPOSITORY --pattern $zip.name --dir .runtime-download --clobber
+              New-Item -ItemType Directory -Force -Path .runtime | Out-Null
+              Expand-Archive -Path ".runtime-download/$($zip.name)" -DestinationPath .runtime -Force
+              $dshManifest = ".runtime/dsh-deploy/node_modules/@deepseek-ai/dsh/package.json"
+              if (Test-Path ".runtime/node/node.exe" -and (Test-Path $dshManifest)) {
+                $synced = $true
+                Write-Output "runtime synced: v$((Get-Content $dshManifest | ConvertFrom-Json).version)"
+              }
+            }
+          } catch {
+            Write-Output "engine zip sync failed: $($_.Exception.Message); falling back to local build"
+          }
+          if (-not $synced) {
+            npm run prepare:runtime
+          }
+          npm run build:runtime-zip
+          npx electron-builder --win nsis --publish always
 
       - name: Upload companion engine zip to the same release
         # electron-builder 创建的 release 标签是 v<version>（如 v0.1.0-rc.5），
