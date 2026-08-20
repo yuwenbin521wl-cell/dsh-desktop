@@ -1,0 +1,45 @@
+# electron-builder 打包配置：Windows x64 NSIS 安装包 + GitHub Releases 更新源。
+# 更新源默认 github（deepseek-ai/deepseek-harness 的 Release），可用环境变量
+# DSH_DESKTOP_UPDATE_URL 在运行时覆盖为 generic 源（见 README）。
+appId: com.deepseek-ai.dsh-desktop
+productName: DeepSeek Harness
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - package.json
+extraResources:
+  # 自包含的 dsh 运行时（独立 node.exe + npm 部署的 dsh 生产依赖树），
+  # 由 scripts/prepare-runtime.ts 生成，置于 asar 之外（独立 node.exe 读不了 asar）。
+  - from: .runtime
+    to: dsh-runtime
+  # 应用图标（窗口标题栏 + 系统托盘）：build/ 是 buildResources 会被自动排除，
+  # 所以放到 resources/icon.png 供主进程 nativeImage 读取。
+  - from: build/icon.png
+    to: icon.png
+asar: true
+# 桌面壳自身没有原生依赖（唯一 prod 依赖 electron-updater 是纯 JS），
+# 跳过 @electron/rebuild，避免扫描到 node_modules 里的残留原生模块（如 node-pty）
+# 时触发 node-gyp 重建失败。
+npmRebuild: false
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 文件名不带空格：latest.yml 里的 url 与磁盘文件名必须一致，否则 electron-updater 下载 404。
+  artifactName: DeepSeek-Harness-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DeepSeek Harness
+  deleteAppDataOnUninstall: false
+publish:
+  provider: github
+  owner: yuwenbin521wl-cell
+  repo: dsh-desktop

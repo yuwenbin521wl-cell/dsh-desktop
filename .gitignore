@@ -1,0 +1,6 @@
+.runtime/
+release/
+node_modules/
+dist/
+build/icon.png
+*.tsbuildinfo

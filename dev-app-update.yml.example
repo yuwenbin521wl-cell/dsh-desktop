@@ -1,0 +1,4 @@
+# 开发模式测试自动更新用：复制为 dev-app-update.yml 后，未打包的 `npm run dev`
+# 也会启用更新检查（forceDevUpdateConfig），配合 scripts/dev-update-feed.mjs 使用。
+provider: generic
+url: http://127.0.0.1:8899
