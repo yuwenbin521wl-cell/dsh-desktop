@@ -16,17 +16,14 @@
 
 import { app, dialog } from 'electron'
 import { createHash } from 'node:crypto'
-import { execFile, spawn } from 'node:child_process'
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { currentDshVersion, readRuntimeState, resolveRuntimeRoot, rmRuntimeDir, writeRuntimeState, bundledDshVersion, removeRuntimeState } from './runtime'
+import { currentDshVersion, readRuntimeState, rmRuntimeDir, writeRuntimeState, bundledDshVersion, removeRuntimeState } from './runtime'
 import { diag } from './diag'
 import { t } from './i18n'
 
-/** 官方 npm 上 @deepseek-ai/dsh 的最新版查询（真正的官方发布节奏）。 */
-const NPM_DSH_LATEST = 'https://registry.npmjs.org/@deepseek-ai/dsh/latest'
-
-/** 引擎 zip 发布的 GitHub 仓库（owner/repo），仅 DSH_DESKTOP_RUNTIME_URL 自建源模式使用。 */
+/** 引擎 zip 发布的 GitHub 仓库（owner/repo），可用 DSH_DESKTOP_RUNTIME_REPO 覆盖。 */
 const RUNTIME_RELEASE_REPO = 'yuwenbin521wl-cell/dsh-desktop'
 
 /** 自动检查间隔：6 小时。 */
@@ -38,11 +35,9 @@ const FIRST_CHECK_DELAY_MS = 12 * 1000
 /** 引擎更新信息。 */
 interface RuntimeUpdateInfo {
   version: string
-  /** 'npm'：直接从官方 npm 安装（默认，无需中转仓库）；'zip'：自建源下载 zip。 */
-  kind: 'npm' | 'zip'
-  /** zip 方式时的下载地址（npm 方式为空）。 */
+  /** zip 下载地址。 */
   url: string
-  /** 小写 hex sha256；zip 方式使用，为空则跳过校验。 */
+  /** 小写 hex sha256；为空则跳过校验。 */
   sha256: string
 }
 
@@ -113,13 +108,13 @@ function isNewerVersion(candidate: string, current: string): boolean {
 }
 
 /**
- * 解析最新引擎信息（按优先级）：
- * 1. 自建源（DSH_DESKTOP_RUNTIME_URL → latest.json，含 version/url/sha256）→ zip 方式；
- * 2. 默认：查询官方 npm @deepseek-ai/dsh 版本号，zip 下载地址按固定模式拼 GitHub
- *    Releases（由你仓库的 engine-sync 自动构建发布，全自动、~2 分钟更新）：
- *    https://github.com/<repo>/releases/download/dsh-engine-v<version>/dsh-runtime-v<version>.zip
- *    HEAD 探测 zip 存在才视为“可更新”（构建完成才提示，避免点了报 404）；
- * 3. DSH_DESKTOP_ENGINE_NPM=1 时走 npm 直装（官方直拉、无需中转，但较慢）。
+ * 解析最新引擎信息：
+ * 1. 自建源（DSH_DESKTOP_RUNTIME_URL → latest.json，含 version/url/sha256）优先；
+ * 2. 默认：查发布仓库（默认 yuwenbin521wl-cell/dsh-desktop）Releases 里最新的
+ *    dsh-engine-v* release，取其 dsh-runtime-v<version>.zip 资产（由 engine-sync
+ *    自动从官方代码构建发布）。zip 存在才视为“可更新”——版本与官方代码同步，
+ *    构建完成才能检测到，天然避免“提示可更新但点下去 404”。
+ *    国内网络可设置 DSH_DESKTOP_GITHUB_PROXY（如 https://ghproxy.com/）加速下载。
  */
 async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
   const custom = process.env.DSH_DESKTOP_RUNTIME_URL
@@ -134,137 +129,38 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
     const url = /^https?:\/\//.test(data.url) ? data.url : `${custom}/${data.url.replace(/^\//, '')}`
     return {
       version: data.version,
-      kind: 'zip',
       url,
       sha256: typeof data.sha256 === 'string' ? data.sha256.toLowerCase() : '',
     }
   }
-  // 官方 npm 版本信号：跟随官方发布节奏（频繁发布也能及时感知）。
-  diag('runtime feed: official npm @deepseek-ai/dsh')
-  const npmRes = await fetch(NPM_DSH_LATEST, { headers: { Accept: 'application/json' } })
-  if (!npmRes.ok) throw new Error(`官方 npm 返回 ${npmRes.status}`)
-  const npmData = await npmRes.json() as { version?: unknown }
-  if (typeof npmData.version !== 'string' || npmData.version === '') {
-    throw new Error('官方 npm 返回格式错误（缺少 version）')
-  }
-  const version = npmData.version
-  if (process.env.DSH_DESKTOP_ENGINE_NPM === '1') {
-    diag(`official engine version: ${version} (npm direct install)`)
-    return { version, kind: 'npm', url: '', sha256: '' }
-  }
   const repo = (process.env.DSH_DESKTOP_RUNTIME_REPO ?? RUNTIME_RELEASE_REPO).replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '')
-  const rawUrl = `https://github.com/${repo}/releases/download/dsh-engine-v${version}/dsh-runtime-v${version}.zip`
-  // 国内网络可设置 DSH_DESKTOP_GITHUB_PROXY（如 https://ghproxy.com/）加速 GitHub 下载。
-  const proxy = process.env.DSH_DESKTOP_GITHUB_PROXY
-  const url = proxy !== undefined && proxy !== '' ? `${proxy.replace(/\/$/, '')}/${rawUrl}` : rawUrl
-  diag(`official engine version: ${version}; zip: ${url}`)
-  // 探测 zip 是否已构建发布；构建完成才提示可更新（避免点了报 404）。
-  let probe: Response
-  try {
-    probe = await fetch(url, { method: 'HEAD' })
-  } catch (error) {
-    throw new Error(`无法连接引擎更新源（${error instanceof Error ? error.message : String(error)}）。请检查网络；国内网络可设置 DSH_DESKTOP_RUNTIME_URL 或 DSH_DESKTOP_GITHUB_PROXY`)
-  }
-  if (probe.status === 404) {
-    diag(`engine zip not built yet (${url}) — treat as no update`)
-    return null
-  }
-  if (!probe.ok) throw new Error(`引擎更新包探测失败（${probe.status}）`)
-  return { version, kind: 'zip', url, sha256: '' }
-}
-
-/**
- * 用内置 node + npm 在复制的运行时上直接安装官方 @deepseek-ai/dsh 包：
- * 复制当前生效运行时 → 注入 allowScripts → npm install @deepseek-ai/dsh@<version>
- * → 校验 → 替换为 userData/runtime-v<version> → 写状态。
- * @returns “恢复”函数（npm 方式无需停服务器，恒为 null）。
- */
-async function installRuntimeFromNpm(info: RuntimeUpdateInfo): Promise<(() => Promise<void>) | null> {
-  const userData = app.getPath('userData')
-  const baseRoot = resolveRuntimeRoot()
-  const target = join(userData, `runtime-v${info.version}`)
-  const tmp = `${target}.tmp`
-  rmRuntimeDir(tmp)
-  diag(`cloning runtime ${baseRoot} -> ${tmp}`)
-  cpSync(baseRoot, tmp, { recursive: true })
-
-  const deployDir = join(tmp, 'dsh-deploy')
-  const nodeExe = join(tmp, 'node', 'node.exe')
-  const npmCli = join(tmp, 'node', 'node_modules', 'npm', 'bin', 'npm-cli.js')
-  if (!existsSync(nodeExe) || !existsSync(npmCli)) {
-    rmRuntimeDir(tmp)
-    throw new Error('运行时缺少 node/npm，无法直接安装官方引擎')
-  }
-
-  // 重写 dsh-deploy/package.json：只保留 @deepseek-ai/dsh 的官方 registry 依赖，
-  // 移除 prepare 时的 file: tarballs 引用（否则 npm install 官方版本会被 file:
-  // 依赖顶住、装不进新版本）。npm install 会按官方闭包重建 node_modules。
-  // npm 11+ 的 allowScripts 同时写进去，放行原生模块构建脚本。
-  const deployPkgPath = join(deployDir, 'package.json')
-  writeFileSync(deployPkgPath, JSON.stringify({
-    name: 'dsh-runtime',
-    private: true,
-    version: '0.0.0',
-    dependencies: { '@deepseek-ai/dsh': `^${info.version}` },
-    allowScripts: {
-      'node-pty': true,
-      koffi: true,
-      '@deepseek-ai/dsh-subprocess-local': true,
-      '@google/genai': false,
-      protobufjs: false,
-    },
-  }, null, 2))
-
-  diag(`npm install @deepseek-ai/dsh@${info.version} in ${deployDir}`)
-  // 全新安装：删除复制的旧 node_modules，避免 npm 对旧树做缓慢的增量 reify。
-  // 用户机器上 npm 有本地缓存，后续更新会显著加快。
-  rmRuntimeDir(join(deployDir, 'node_modules'))
-  rmRuntimeDir(join(deployDir, 'package-lock.json'))
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      nodeExe,
-      [npmCli, 'install', '--no-audit', '--no-fund'],
-      { cwd: deployDir, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
-    )
-    let stderrText = ''
-    child.stderr?.on('data', (chunk: Buffer) => { stderrText += chunk.toString() })
-    child.on('error', (error) => reject(new Error(`npm install 启动失败：${error.message}`)))
-    child.on('exit', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`npm install 失败（exit ${code ?? 'null'}）：${stderrText.slice(-800)}`))
-    })
+  diag(`runtime feed: releases of ${repo} (dsh-engine-v*)`)
+  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
   })
-
-  // 校验安装结果：dsh bin 存在且版本一致。
-  const bin = join(deployDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-  const manifest = join(deployDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
-  if (!existsSync(bin)) {
-    rmRuntimeDir(tmp)
-    throw new Error('npm install 后缺少 dsh bin')
+  if (!res.ok) throw new Error(`GitHub Releases 查询失败（${res.status}）。请检查网络或 DSH_DESKTOP_RUNTIME_REPO 配置`)
+  const releases = await res.json() as Array<{
+    tag_name?: string
+    assets?: Array<{ name?: string; browser_download_url?: string; digest?: string }>
+  }>
+  for (const release of releases) {
+    if (typeof release.tag_name !== 'string' || !release.tag_name.startsWith('dsh-engine-v')) continue
+    const asset = (release.assets ?? []).find((a) => typeof a.name === 'string' && /^dsh-runtime-v.*\.zip$/i.test(a.name))
+    if (asset?.name === undefined || asset.browser_download_url === undefined) continue
+    const version = asset.name.replace(/^dsh-runtime-v/i, '').replace(/\.zip$/i, '')
+    const rawUrl = asset.browser_download_url
+    const proxy = process.env.DSH_DESKTOP_GITHUB_PROXY
+    const url = proxy !== undefined && proxy !== '' ? `${proxy.replace(/\/$/, '')}/${rawUrl}` : rawUrl
+    const digest = asset.digest ?? ''
+    diag(`engine release found: ${release.tag_name} (${url})`)
+    return { version, url, sha256: digest.replace(/^sha256:/i, '').toLowerCase() }
   }
-  let installedVersion: string | undefined
-  try {
-    installedVersion = (JSON.parse(readFileSync(manifest, 'utf8')) as { version?: unknown }).version as string | undefined
-  } catch {
-    /* 版本读取失败走下面的不符分支 */
-  }
-  if (installedVersion !== info.version) {
-    rmRuntimeDir(tmp)
-    throw new Error(`引擎版本不符：期望 ${info.version}，实际 ${installedVersion ?? '未知'}`)
-  }
-
-  rmRuntimeDir(target)
-  renameSync(tmp, target)
-  writeRuntimeState({ version: info.version, dir: target, appliedAt: new Date().toISOString() })
-  diag(`runtime installed at ${target} (npm direct)`)
+  diag('no dsh-engine-v* release with runtime zip found')
   return null
 }
 
-/** 更新引擎：按 kind 分流（npm 直装 / zip 下载解压）。返回“恢复”函数。 */
+/** 更新引擎（zip 下载解压）。返回“恢复”函数。 */
 async function downloadAndInstallRuntime(info: RuntimeUpdateInfo): Promise<(() => Promise<void>) | null> {
-  if (info.kind === 'npm') {
-    return installRuntimeFromNpm(info)
-  }
   const userData = app.getPath('userData')
   const zipDir = join(userData, 'updates')
   mkdirSync(zipDir, { recursive: true })
