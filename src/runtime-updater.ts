@@ -153,10 +153,18 @@ async function fetchRuntimeUpdateInfo(): Promise<RuntimeUpdateInfo | null> {
     return { version, kind: 'npm', url: '', sha256: '' }
   }
   const repo = (process.env.DSH_DESKTOP_RUNTIME_REPO ?? RUNTIME_RELEASE_REPO).replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '')
-  const url = `https://github.com/${repo}/releases/download/dsh-engine-v${version}/dsh-runtime-v${version}.zip`
+  const rawUrl = `https://github.com/${repo}/releases/download/dsh-engine-v${version}/dsh-runtime-v${version}.zip`
+  // 国内网络可设置 DSH_DESKTOP_GITHUB_PROXY（如 https://ghproxy.com/）加速 GitHub 下载。
+  const proxy = process.env.DSH_DESKTOP_GITHUB_PROXY
+  const url = proxy !== undefined && proxy !== '' ? `${proxy.replace(/\/$/, '')}/${rawUrl}` : rawUrl
   diag(`official engine version: ${version}; zip: ${url}`)
   // 探测 zip 是否已构建发布；构建完成才提示可更新（避免点了报 404）。
-  const probe = await fetch(url, { method: 'HEAD' })
+  let probe: Response
+  try {
+    probe = await fetch(url, { method: 'HEAD' })
+  } catch (error) {
+    throw new Error(`无法连接引擎更新源（${error instanceof Error ? error.message : String(error)}）。请检查网络；国内网络可设置 DSH_DESKTOP_RUNTIME_URL 或 DSH_DESKTOP_GITHUB_PROXY`)
+  }
   if (probe.status === 404) {
     diag(`engine zip not built yet (${url}) — treat as no update`)
     return null
