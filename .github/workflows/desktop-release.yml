@@ -48,6 +48,11 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
+      - name: Install desktop dependencies
+        # 必须先装桌面端依赖（tsc / electron-builder 等），否则 npm run 直接失败。
+        # postinstall 会从 npmmirror 下载 electron 二进制（npm ci 自带）。
+        run: npm ci
+
       - name: Build and publish desktop installer
         shell: pwsh
         env:
