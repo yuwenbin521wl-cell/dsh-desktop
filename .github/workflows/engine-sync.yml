@@ -1,0 +1,79 @@
+# 引擎自动同步：从官方 deepseek-ai/deepseek-harness 构建 dsh-runtime zip 并发布到本仓库。
+#
+# 用法：把这个文件复制到你的发布仓库（如 dsh-desktop）的 .github/workflows/ 下，
+# 然后：
+#   1. 桌面版设置 DSH_DESKTOP_RUNTIME_REPO=<你的GitHub名>/<你的仓库名>（或改
+#      desktop/src/runtime-updater.ts 里的 RUNTIME_RELEASE_REPO 后重新打包）；
+#   2. 本工作流定时（每 6 小时）和手动触发：拉官方最新代码 → 构建完整运行时 →
+#      发布到 Release（tag: dsh-engine-v<版本>，资产: dsh-runtime-v<版本>.zip + .sha256）。
+# 桌面版“检查引擎更新…”/启动自动检查发现官方新版后，即可下载该 zip 更新引擎。
+#
+# 注意：若官方仓库 desktop/ 目录的构建逻辑变化，本工作流可能需要同步调整。
+
+name: engine-sync
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-runtime:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout official harness
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          path: harness
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: harness/pnpm-lock.yaml
+
+      - name: Install and build harness (lib + web)
+        working-directory: harness
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build dsh runtime zip
+        working-directory: harness/desktop
+        run: |
+          npm ci
+          npm run prepare:runtime
+          npm run build:runtime-zip
+
+      - name: Read engine version
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Get-Content harness/desktop/.runtime/dsh-deploy/node_modules/@deepseek-ai/dsh/package.json | ConvertFrom-Json
+          "version=$($m.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish engine zip to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $zip = "harness/desktop/release/dsh-runtime-v$v.zip"
+          $sha = "harness/desktop/release/dsh-runtime-v$v.zip.sha256"
+          $tag = "dsh-engine-v$v"
+          gh release view $tag --json name *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag $zip $sha --title "dsh engine v$v" --notes "自动同步官方 deepseek-ai/deepseek-harness@$v" --latest=false
+          } else {
+            gh release upload $tag $zip $sha --clobber
+          }
