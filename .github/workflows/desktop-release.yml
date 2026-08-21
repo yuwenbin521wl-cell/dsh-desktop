@@ -90,30 +90,59 @@ jobs:
           # 壳版本始终与内置引擎版本一致（不做自增）
           npm run sync:version
           npm run build:runtime-zip
-          npx electron-builder --win nsis --publish always
+          # 只打包、不发布：发布统一走下面的 gh release 步骤，确保主安装包
+          # exe 一定被上传（electron-builder --publish 在 release 已存在时会
+          # 跳过已存在资产，导致 exe 缺失而 blockmap 却传上去了）。
+          npx electron-builder --win nsis --publish never
 
-      - name: Upload companion engine zip to the same release
-        # electron-builder 创建的 release 标签是 v<version>（如 v0.1.0-rc.5），
-        # 不是触发事件的 tag（dsh-desktop-v*），所以从 package.json 读版本号定位。
+      - name: Upload installer + engine to GitHub release
+        # 用 gh release 统一创建 release 并上传全部资产，保证 exe 一定在。
+        # release 标签取 package.json 版本（v<version>），与触发 tag（dsh-desktop-v*）无关。
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $v = (Get-Content package.json | ConvertFrom-Json).version
           $tag = "v$v"
-          $zip = Get-ChildItem release/dsh-runtime-v*.zip | Select-Object -First 1
-          if ($zip) {
-            $sha = "$($zip.FullName).sha256"
-            gh release view $tag *> $null
-            if ($LASTEXITCODE -ne 0) {
-              gh release create $tag --title "DeepSeek Harness v$v" --notes "DeepSeek Harness desktop v$v" --draft
+          # 主安装包 + blockmap + 更新清单（electron-builder 产物）
+          # 注意：[regex]::Escape 会把结尾的 $ 也转义成 \$，所以用 Escape(前缀)+'$'
+          # 拼出"以该串结尾"的锚点，否则匹配的是字面 $ 符号、永远不命中。
+          $exe = Get-ChildItem release/DeepSeek-Harness-Setup-*.exe | Where-Object { $_.Name -match ([regex]::Escape("-$v.exe") + '$') } | Select-Object -First 1
+          $blockmap = Get-ChildItem release/DeepSeek-Harness-Setup-*.exe.blockmap | Where-Object { $_.Name -match ([regex]::Escape("-$v.exe.blockmap") + '$') } | Select-Object -First 1
+          $yml = Get-ChildItem release/latest.yml | Select-Object -First 1
+          # 配套引擎 zip + sha256
+          $zip = Get-ChildItem release/dsh-runtime-v*.zip | Where-Object { $_.Name -match ([regex]::Escape("-v$v.zip") + '$') } | Select-Object -First 1
+          $sha = Get-ChildItem release/dsh-runtime-v*.zip.sha256 | Where-Object { $_.Name -match ([regex]::Escape("-v$v.zip.sha256") + '$') } | Select-Object -First 1
+
+          if (-not $exe) { throw "主安装包未找到: release/DeepSeek-Harness-Setup-$v.exe" }
+
+          # 收集要上传的文件
+          $files = @($exe.FullName)
+          if ($blockmap) { $files += $blockmap.FullName }
+          if ($yml) { $files += $yml.FullName }
+          if ($zip) { $files += $zip.FullName }
+          if ($sha) { $files += $sha.FullName }
+
+          # release 已存在则复用（可能来自上次的残缺 draft），否则创建
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY `
+              --title "DeepSeek Harness v$v" --notes "DeepSeek Harness desktop v$v" `
+              --draft $files
+          } else {
+            # 已存在：先清掉同名旧资产再上传（避免 exe 缺失的残缺状态残留）
+            $assetNames = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets -q '.assets[].name' 2>$null
+            foreach ($asset in $assetNames) {
+              if ($asset -and $asset.Trim() -ne '') {
+                gh release delete-asset $tag $asset --repo $env:GITHUB_REPOSITORY --yes *> $null
+              }
             }
-            gh release upload $tag $zip.FullName $sha --clobber
+            gh release upload $tag $files --repo $env:GITHUB_REPOSITORY --clobber
           }
 
       - name: Publish release (draft -> public)
-        # electron-builder --publish 默认创建 draft release；draft 不算 latest，
-        # 用户端 electron-updater 查不到，必须转成正式 release。
+        # 转成正式 release 才能成为 latest，用户端 electron-updater 才能查到。
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
