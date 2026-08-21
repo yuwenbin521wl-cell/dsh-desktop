@@ -22,6 +22,35 @@ npm run dev        # 编译外壳，并用仓库已构建的 dsh（apps/cli/lib/
 
 `npm run dev` 会拉起仓库自身的 `dsh web`（请先至少执行过一次仓库根的 `pnpm run build`），并在桌面窗口打开 UI；端口由操作系统分配（`--port 0`），不会和你正在跑的 3080 webui 冲突。
 
+## 识图 / 图片识别配置
+
+桌面客户端内置了 [`dsh-vision-router`](https://www.npmjs.com/package/dsh-vision-router) 插件（首次运行会自动写入桌面版 profile），因此含图片的对话默认即可用。默认会回退到免 Key 的 OVH 匿名视觉端点（有限流）；想要更稳定、更高吞吐的识别，请配置你自己的视觉后端 Key。
+
+插件从以下**任一处**读取视觉 API Key：
+
+1. **DSH 凭据文件（推荐）**——DSH 本就读取的同一个 `.credentials.yaml`：
+   - Web 版：`~/.dsh/.credentials.yaml`
+   - 桌面版：`%APPDATA%\dsh-desktop\home\.credentials.yaml`（隔离的 `DSH_HOME`）
+2. **环境变量**——名称对应该 `httpProviders` 条目里的 `apiKeyEnv` 字段。
+
+示例：启用内置的智谱（`glm-4v-flash`）与 DashScope（`qwen-vl`）后端。在凭据文件里加入：
+
+```yaml
+ZHIPU_API_KEY: 你的智谱key
+DASHSCOPE_API_KEY: 你的千问key
+```
+
+或者等价地，把它们设成用户环境变量：
+
+```powershell
+setx ZHIPU_API_KEY "你的智谱key"
+setx DASHSCOPE_API_KEY "你的千问key"
+```
+
+> **重要**：通过 `setx` 或控制面板设置的环境变量，只有**新启动的进程**才会读取。已经运行的桌面客户端（以及它拉起的 `dsh web`）会保留启动那一刻的环境快照——设置变量后必须**完全退出并重新打开**客户端。而**凭据文件没有这个限制**：DSH 会在运行时重新读取，因此即时生效、重启不丢。由于桌面版使用隔离的 `DSH_HOME`，它的 Key 必须放在**桌面版**的凭据文件（或桌面版自身的环境）里，而不是 web 版的。
+
+免费视觉 Key 渠道与完整配置项见插件 [README](https://www.npmjs.com/package/dsh-vision-router)。
+
 ## 构建安装包
 
 ```sh

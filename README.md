@@ -22,6 +22,35 @@ npm run dev        # build the shell and run it against the repo's built dsh (ap
 
 `npm run dev` spawns the repository's own `dsh web` (you must have run `pnpm run build` at the repository root at least once) and opens the UI in a desktop window on an OS-assigned port, so it never collides with an already running web UI on port 3080.
 
+## Vision / image recognition setup
+
+The desktop client bundles the [`dsh-vision-router`](https://www.npmjs.com/package/dsh-vision-router) plugin (auto-installed into the desktop profile on first run) so image-capable turns work out of the box. By default it falls back to the free, keyless OVH anonymous vision endpoints (rate-limited); for reliable, higher-throughput recognition, configure your own vision backend key.
+
+The plugin reads vision API keys from **either**:
+
+1. **The DSH credentials file** (recommended) — the same `.credentials.yaml` DSH already reads:
+   - Web UI: `~/.dsh/.credentials.yaml`
+   - Desktop: `%APPDATA%\dsh-desktop\home\.credentials.yaml` (isolated `DSH_HOME`)
+2. **Environment variables** — named by the `apiKeyEnv` field of each `httpProviders` entry.
+
+Example — enable the built-in Zhipu (`glm-4v-flash`) and DashScope (`qwen-vl`) backends. Add to your credentials file:
+
+```yaml
+ZHIPU_API_KEY: your-zhipu-key
+DASHSCOPE_API_KEY: your-dashscope-key
+```
+
+Or, equivalently, set them as user environment variables:
+
+```powershell
+setx ZHIPU_API_KEY "your-zhipu-key"
+setx DASHSCOPE_API_KEY "your-dashscope-key"
+```
+
+> **Important**: environment variables set via `setx` or the Control Panel are picked up only by **newly started** processes. A desktop client (and the `dsh web` it spawns) that is already running keeps the environment snapshot it launched with — you must fully quit and reopen the client after setting the variables. The credentials-file route does **not** have this limitation: DSH re-reads it at runtime, so it works immediately and survives restarts. Because the desktop client uses an isolated `DSH_HOME`, its keys must live in the desktop credentials file (or the desktop's own environment), not the web UI's.
+
+Free vision key sources and full configuration options are documented in the plugin's [README](https://www.npmjs.com/package/dsh-vision-router).
+
 ## Build the installer
 
 ```sh
