@@ -1,6 +1,11 @@
 .runtime/
+.cache/
 release/
 node_modules/
 dist/
 build/icon.png
 *.tsbuildinfo
+# 本地调试/会话转储，不应提交
+sess-dump.jsonl
+scripts/decompress-session.mjs
+scripts/restart-webui.ps1

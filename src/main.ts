@@ -6,7 +6,7 @@
  */
 
 import { app, BrowserWindow, dialog, Menu, nativeImage, session, shell, Tray } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { diag, initDiag, installDiagHandlers } from './diag'
 import { resolveDshBin, resolveNodeExecutable, bundledDshVersion, currentDshVersion } from './runtime'
@@ -14,6 +14,7 @@ import { startDshServer, type DshServerHandle } from './server'
 import { checkForUpdates, initUpdater } from './updater'
 import { checkRuntimeUpdates, initRuntimeUpdater, restoreBundledRuntime, setRuntimePreInstallHook } from './runtime-updater'
 import { refreshShellLanguage, t } from './i18n'
+import { preinstalledProfilePackageJson, PREINSTALLED_BUNDLES, PREINSTALLED_DEPENDENCIES } from './preinstalled-plugins'
 
 /** 服务器句柄，退出时回收。 */
 let server: DshServerHandle | null = null
@@ -280,6 +281,7 @@ async function boot(): Promise<void> {
     : join(app.getPath('userData'), 'home')
   mkdirSync(isolatedHome, { recursive: true })
   process.env.DSH_HOME = isolatedHome
+  ensurePreinstalledPlugins(isolatedHome)
   diag(`DSH_HOME (desktop, isolated): ${isolatedHome}`)
   installPermissionHandler()
   installMenu()
@@ -360,3 +362,64 @@ if (!app.requestSingleInstanceLock()) {
 app.on('window-all-closed', () => {
   /* 驻留托盘：不退出 */
 })
+
+/**
+ * 首次运行（或缺少预装插件时）把预置插件写入桌面版 web profile。
+ *
+ * profile 文件路径为 `<home>/profiles/web/package.json`，dsh 引擎首次启动时会
+ * 自动创建该目录并生成默认 package.json（只有 dsh-base / dsh-web-app）。本函数
+ * 保证其中的预置插件（识图、侧边栏、记忆进化等）在启动前就绪：
+ *  - profile 不存在 → 直接写入预置内容；
+ *  - profile 已存在 → 只补齐缺失的预置插件（合并到 dependencies 与 bundles），
+ *    保留用户自己安装/声明的其他插件，绝不覆盖或删除。
+ * 幂等：重复启动不会重复追加。
+ * @param home - 桌面版隔离的 DSH_HOME。
+ */
+function ensurePreinstalledPlugins(home: string): void {
+  const profileDir = join(home, 'profiles', 'web')
+  const profilePath = join(profileDir, 'package.json')
+  try {
+    if (!existsSync(profilePath)) {
+      mkdirSync(profileDir, { recursive: true })
+      writeFileSync(profilePath, preinstalledProfilePackageJson(), 'utf8')
+      diag(`preinstalled plugins: wrote default profile ${profilePath}`)
+      return
+    }
+    const existing = JSON.parse(readFileSync(profilePath, 'utf8')) as {
+      dependencies?: Record<string, string>
+      dsh?: { profile?: { bundles?: string[] } }
+    }
+    const dependencies = existing.dependencies ?? {}
+    const bundles = existing.dsh?.profile?.bundles ?? []
+    let changed = false
+    for (const [name, spec] of Object.entries(PREINSTALLED_DEPENDENCIES)) {
+      if (dependencies[name] === undefined) {
+        dependencies[name] = spec
+        changed = true
+      }
+    }
+    for (const bundle of PREINSTALLED_BUNDLES) {
+      if (!bundles.includes(bundle)) {
+        bundles.push(bundle)
+        changed = true
+      }
+    }
+    if (!changed) return
+    const merged = {
+      ...existing,
+      dependencies,
+      dsh: {
+        ...(existing.dsh ?? {}),
+        profile: {
+          ...(existing.dsh?.profile ?? {}),
+          bundles,
+        },
+      },
+    }
+    writeFileSync(profilePath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+    diag(`preinstalled plugins: merged missing plugins into ${profilePath}`)
+  } catch (error) {
+    diag(`preinstalled plugins skipped: ${String(error)}`)
+  }
+}
+

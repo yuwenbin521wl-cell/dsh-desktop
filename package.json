@@ -11,9 +11,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare:runtime": "tsx scripts/prepare-runtime.ts",
     "build:runtime-zip": "tsx scripts/build-runtime-zip.ts",
+    "sync:version": "tsx scripts/sync-version.ts",
     "dev": "npm run build && electron .",
-    "dist": "npm run build && npm run prepare:runtime && npm run build:runtime-zip && electron-builder --win nsis --publish never",
-    "dist:publish": "npm run build && npm run prepare:runtime && npm run build:runtime-zip && electron-builder --win nsis --publish always",
+    "dist": "npm run build && npm run prepare:runtime && npm run sync:version && npm run build:runtime-zip && electron-builder --win nsis --publish never",
+    "dist:publish": "npm run build && npm run prepare:runtime && npm run sync:version && npm run build:runtime-zip && electron-builder --win nsis --publish always",
     "electron:install": "node node_modules/electron/install.js",
     "postinstall": "node node_modules/electron/install.js"
   },

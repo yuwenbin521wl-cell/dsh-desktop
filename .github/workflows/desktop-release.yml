@@ -87,6 +87,8 @@ jobs:
           if (-not $synced) {
             npm run prepare:runtime
           }
+          # 壳版本始终与内置引擎版本一致（不做自增）
+          npm run sync:version
           npm run build:runtime-zip
           npx electron-builder --win nsis --publish always
 
