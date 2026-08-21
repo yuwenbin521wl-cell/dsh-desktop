@@ -514,6 +514,16 @@ export async function checkRuntimeUpdates(manual: boolean): Promise<void> {
 
 /** 注册定时检查。在 app ready 后调用一次。 */
 export function initRuntimeUpdater(): void {
+  // 启动时校准：若随安装包分发的新版内置引擎 ≥ 上次手动更新到的引擎版本，
+  // 说明用户重装了更新的壳（内置引擎已更新），旧的手动更新记录不再有意义——
+  // 清掉 runtime-state，让客户端直接使用安装包内置的新引擎，避免“装的是新壳
+  // 却仍在用旧引擎、又提示更新”的困惑。仅当内置引擎确实不旧于记录时才清理。
+  const state = readRuntimeState()
+  const builtin = bundledDshVersion()
+  if (state !== null && typeof builtin === 'string' && builtin !== '' && !isNewerVersion(state.version, builtin)) {
+    diag(`bundled engine ${builtin} >= manual ${state.version}; clearing runtime-state to use bundled engine`)
+    removeRuntimeState()
+  }
   setTimeout(() => void checkRuntimeUpdates(false), FIRST_CHECK_DELAY_MS)
   setInterval(() => void checkRuntimeUpdates(false), AUTO_CHECK_INTERVAL_MS)
 }
